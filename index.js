@@ -2,6 +2,7 @@
 const path = require('path')
 const { app, BrowserWindow, Menu, nativeImage, session, shell, Tray } = require('electron')
 const { windowStateKeeper } = require("./stateKeeper")
+const { configureSecurity, isCalendarUrl } = require('./security');
 // const isDevelopment = process.env.NODE_ENV !== "production";
 const isDevelopment = require("electron-is-dev");
 const { readFileSync, writeFileSync, existsSync, mkdirSync } = require('fs');
@@ -23,13 +24,12 @@ const CALENDAR_VIEWS = {
     YEAR: `${CALENDAR_BASE_URL}/year`
 }
 const DEFAULT_VIEW = 'AGENDA';
-const GOOGLE_ACCOUNTS = `https://accounts.google.com`
 let cssInjected = false;
 let cssContent = '';
 
 // Function to detect calendar view from URL
 const detectViewFromUrl = (url) => {
-    if (!url || !url.includes('calendar.google.com')) return null;
+    if (!isCalendarUrl(url)) return null;
 
     if (url.includes('/agenda')) return 'AGENDA';
     if (url.includes('/day')) return 'DAY';
@@ -110,14 +110,15 @@ const loadCssContent = () => {
 }
 
 const setHomeCss = (mainWindow) => {
+    if (!isCalendarUrl(mainWindow.webContents.getURL())) return;
+
     if (!cssContent) {
         loadCssContent();
     }
 
     // Get the current URL to determine which view we're in
     mainWindow.webContents.executeJavaScript(`window.location.href`).then(url => {
-        console.log(`Current URL for CSS application: ${url}`);
-
+        if (!isCalendarUrl(url) || !isCalendarUrl(mainWindow.webContents.getURL())) return;
         // Determine which view we're in
         let currentView = 'unknown';
         if (url.includes('/agenda')) currentView = 'agenda';
@@ -407,6 +408,7 @@ const setHomeCss = (mainWindow) => {
         });
     }).catch(err => {
         console.log(`Error getting current URL: ${err}`);
+        if (!isCalendarUrl(mainWindow.webContents.getURL())) return;
 
         // Fallback to applying CSS without view detection
         // Remove any previously injected CSS
@@ -906,6 +908,8 @@ body[data-gcw-view="year"] [data-gcw-year-month] {
 
 // Function to specifically check and fix divider lines
 const fixDividerLines = (mainWindow) => {
+    if (!isCalendarUrl(mainWindow.webContents.getURL())) return;
+
     mainWindow.webContents.executeJavaScript(`
         // Function to ensure divider lines are visible
         function fixDividerLines() {
@@ -1183,23 +1187,18 @@ const createWindow = () => {
         alwaysOnTop: false, // Never set the window to always be on top
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            webSecurity: true,
+            allowRunningInsecureContent: false,
         }
     })
 
-    // Load the last selected view or default to AGENDA
-    const lastView = getLastView();
-    mainWindow.loadURL(CALENDAR_VIEWS[lastView]);
-
-    // Handle new window/link clicks
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-        mainWindow.loadURL(url)
-        return { action: 'deny' };
-    });
+    configureSecurity(mainWindow, (url) => shell.openExternal(url));
 
     // Listen for navigation events
-    mainWindow.webContents.on("will-navigate", (e, url) => {
-        console.log(`will-navigate to: ${url}`)
-
+    mainWindow.webContents.on("will-navigate", ({ url }) => {
         // Save the view if navigating to a calendar view
         const view = detectViewFromUrl(url);
         if (view) {
@@ -1215,10 +1214,10 @@ const createWindow = () => {
     // Listen for when page finishes loading
     mainWindow.webContents.on("did-finish-load", () => {
         const currentURL = mainWindow.webContents.getURL();
-        console.log(`Page finished loading: ${currentURL}`)
+        console.log('Page finished loading');
 
         // Save the current view if it's a calendar view
-        if (currentURL.includes('calendar.google.com')) {
+        if (isCalendarUrl(currentURL)) {
             const view = detectViewFromUrl(currentURL);
             if (view) {
                 saveLastView(view);
@@ -1240,9 +1239,8 @@ const createWindow = () => {
     })
 
     // Listen for redirect navigation events (for OAuth)
-    mainWindow.webContents.on("did-redirect-navigation", (e, url) => {
-        console.log(`Redirected to: ${url}`)
-
+    mainWindow.webContents.on("did-redirect-navigation", ({ url, isMainFrame }) => {
+        if (!isMainFrame) return;
         // Save the view if redirected to a calendar view
         const view = detectViewFromUrl(url);
         if (view) {
@@ -1250,8 +1248,10 @@ const createWindow = () => {
         }
     })
 
-    // Apply CSS initially
-    setHomeCss(mainWindow)
+    const lastView = getLastView();
+    mainWindow.loadURL(CALENDAR_VIEWS[lastView]).catch(() => {
+        console.error('Could not load Google Calendar.');
+    });
 
     windowStateKeeper('main')
         .then((mwk) => {
