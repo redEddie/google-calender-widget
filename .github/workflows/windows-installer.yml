@@ -1,0 +1,36 @@
+name: Build unsigned Windows installer
+
+on:
+  push:
+    branches: [windows-installer-build]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm test
+      - name: Build Windows x64 NSIS installer
+        run: npx --no-install electron-builder --win nsis --x64 --publish never --config.artifactName=Google-Calendar-Widget-1.1.7-security-x64-Setup.exe
+      - name: Record installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-Item -LiteralPath 'dist/Google-Calendar-Widget-1.1.7-security-x64-Setup.exe'
+          $hash = Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ('Installer SHA-256: ' + $hash.Hash)
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/Google-Calendar-Widget-1.1.7-security-x64-Setup.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
