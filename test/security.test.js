@@ -11,6 +11,7 @@ const createWindow = () => {
     const loadedUrls = [];
     contents.url = calendarUrl;
     contents.getURL = () => contents.url;
+    contents.isDestroyed = () => false;
     contents.loadURL = async (url) => loadedUrls.push(url);
     contents.setWindowOpenHandler = (handler) => { contents.openWindow = handler; };
     contents.session = {
@@ -106,6 +107,38 @@ test('redirects cannot leave the trusted top-level origins', () => {
     assert.equal(navigate(contents, 'will-redirect', 'file:///C:/secret').defaultPrevented, true);
     assert.equal(navigate(contents, 'will-redirect', 'https://www.gstatic.com/', false).defaultPrevented, false);
     assert.deepEqual(externalUrls, []);
+});
+
+test('a signed-out Calendar request opens the interactive Google sign-in form once', async () => {
+    const { contents, loadedUrls, externalUrls } = createWindow();
+    const productPage = 'https://workspace.google.com/intl/en-US/products/calendar/';
+    navigate(contents, 'did-start-navigation', calendarUrl);
+    assert.equal(navigate(contents, 'will-redirect', 'https://accounts.google.com/ServiceLogin').defaultPrevented, false);
+    assert.equal(navigate(contents, 'will-redirect', productPage).defaultPrevented, true);
+    assert.equal(navigate(contents, 'will-redirect', productPage).defaultPrevented, true);
+    await new Promise(setImmediate);
+
+    assert.equal(loadedUrls.length, 1);
+    const signIn = new URL(loadedUrls[0]);
+    assert.equal(signIn.origin + signIn.pathname, 'https://accounts.google.com/ServiceLogin');
+    assert.equal(signIn.searchParams.get('service'), 'cl');
+    assert.equal(signIn.searchParams.get('continue'), calendarUrl);
+    assert.deepEqual(externalUrls, []);
+});
+
+test('other redirects remain blocked without starting a sign-in flow', async () => {
+    const { contents, loadedUrls } = createWindow();
+    navigate(contents, 'did-start-navigation', calendarUrl);
+    for (const url of [
+        'https://workspace.google.com/products/drive/',
+        'https://workspace.google.com.example/products/calendar/',
+    ]) {
+        assert.equal(navigate(contents, 'will-redirect', url).defaultPrevented, true);
+    }
+    navigate(contents, 'did-start-navigation', 'https://accounts.google.com/');
+    assert.equal(navigate(contents, 'will-redirect', 'https://workspace.google.com/products/calendar/').defaultPrevented, true);
+    await new Promise(setImmediate);
+    assert.deepEqual(loadedUrls, []);
 });
 
 test('only the calendar origin in this calendar window can request notifications', () => {

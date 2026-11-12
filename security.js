@@ -1,5 +1,6 @@
 const CALENDAR_ORIGIN = 'https://calendar.google.com';
-const APP_ORIGINS = new Set([CALENDAR_ORIGIN, 'https://accounts.google.com']);
+const ACCOUNTS_ORIGIN = 'https://accounts.google.com';
+const APP_ORIGINS = new Set([CALENDAR_ORIGIN, ACCOUNTS_ORIGIN]);
 
 const parseUrl = (value) => {
     try {
@@ -16,9 +17,27 @@ const getHttpsOrigin = (value) => {
 
 const isAppUrl = (value) => APP_ORIGINS.has(getHttpsOrigin(value));
 const isCalendarUrl = (value) => getHttpsOrigin(value) === CALENDAR_ORIGIN;
+const isCalendarProductPage = (value) => (
+    getHttpsOrigin(value) === 'https://workspace.google.com' &&
+    /^\/(?:intl\/[a-z\d-]+\/)?products\/calendar\/?$/i.test(new URL(value).pathname)
+);
+
+const calendarSignInUrl = (calendarUrl) => {
+    const url = new URL('/ServiceLogin', ACCOUNTS_ORIGIN);
+    url.searchParams.set('service', 'cl');
+    url.searchParams.set('continue', calendarUrl);
+    return url.href;
+};
 
 const configureSecurity = (mainWindow, openExternal) => {
     const contents = mainWindow.webContents;
+    let pendingCalendarUrl;
+
+    const openGooglePage = (url) => {
+        contents.loadURL(url).catch(() => {
+            console.error('Could not open the Google page.');
+        });
+    };
 
     const openExternalLink = (value) => {
         const url = parseUrl(value);
@@ -33,9 +52,7 @@ const configureSecurity = (mainWindow, openExternal) => {
 
     contents.setWindowOpenHandler(({ url }) => {
         if (isAppUrl(url)) {
-            contents.loadURL(url).catch(() => {
-                console.error('Could not open the Google page.');
-            });
+            openGooglePage(url);
         } else {
             openExternalLink(url);
         }
@@ -49,11 +66,24 @@ const configureSecurity = (mainWindow, openExternal) => {
         }
     });
 
-    // Redirects must stay within the app's trusted Google origins.
-    contents.on('will-redirect', (event) => {
-        if (event.isMainFrame && !isAppUrl(event.url)) {
-            event.preventDefault();
+    contents.on('did-start-navigation', (event) => {
+        if (event.isMainFrame && !event.isSameDocument) {
+            pendingCalendarUrl = isCalendarUrl(event.url) ? event.url : undefined;
         }
+    });
+
+    contents.on('will-redirect', (event) => {
+        if (!event.isMainFrame || isAppUrl(event.url)) return;
+        event.preventDefault();
+
+        // A signed-out Calendar request can send users to the Workspace product page.
+        // Use the interactive Google sign-in link and return to the requested calendar.
+        if (!pendingCalendarUrl || !isCalendarProductPage(event.url)) return;
+        const signInUrl = calendarSignInUrl(pendingCalendarUrl);
+        pendingCalendarUrl = undefined;
+        setImmediate(() => {
+            if (!contents.isDestroyed()) openGooglePage(signInUrl);
+        });
     });
 
     const allowNotification = (requestContents, permission, requestingUrl) => {
